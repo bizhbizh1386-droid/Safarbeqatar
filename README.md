@@ -16,5 +16,5 @@
 
 ```bash
 pip install -r requirements.txt
-export BOT_TOKEN="توکن از BotFather"
+export BOT_TOKEN="9199343353:AAE-E-3L_BYjKLHoa68ChyaOkNzVojBnCpA"
 python yazd_travel_bot.py
