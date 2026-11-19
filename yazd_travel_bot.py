@@ -26,6 +26,8 @@ python yazd_travel_bot.py
 
 import asyncio
 import io
+import html
+from pathlib import Path
 import logging
 import os
 import random
@@ -60,6 +62,106 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = "yazd_travel.db"
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+
+
+# عکس جاذبه‌ها: از Wikimedia Commons دریافت و در پوشه images کش می‌شود.
+# برای استفاده از عکس‌ها نیازی به Google API Key نیست.
+IMAGE_DIR = Path("images")
+IMAGE_DIR.mkdir(exist_ok=True)
+
+COMMONS_QUERIES = {
+    "bafte": "Yazd historic city old town Iran",
+    "jameh": "Jameh Mosque of Yazd Iran",
+    "amir": "Amir Chakhmaq complex Yazd",
+    "zendan": "Alexander prison Yazd",
+    "fire": "Yazd Atash Behram fire temple",
+    "dakhme": "Towers of silence Yazd Iran",
+    "water": "Yazd water museum",
+    "abanbar": "Yazd Ab Anbar water reservoir",
+    "dolat": "Dowlat Abad Garden Yazd",
+    "qanat": "Zarch Qanat Yazd",
+    "shirkuh": "Shirkuh mountain Yazd",
+    "desert": "Yazd desert Iran",
+    "meybod": "Meybod Narin Castle Iran",
+    "chak": "Chak Chak shrine Iran",
+    "khara": "Kharanaq village Yazd",
+    "zein": "Zein-o-din caravanserai Iran",
+    "mehriz": "Pahlavanpur Garden Mehriz",
+    "abar": "Abarquh ancient cypress Iran",
+    "fahraj": "Fahraj Jame Mosque Yazd",
+    "sary": "Saryazd castle Iran",
+    "mirror": "Yazd Museum of Mirror and Lighting",
+    "heydar": "Yazd historic house",
+    "lari": "Lariha House Yazd",
+    "termeh": "Yazd Termeh textile",
+    "craft": "Yazd pottery handicraft",
+    "bazaar": "Yazd Khan Bazaar",
+}
+
+def _commons_photo(iid):
+    """Download a Commons thumbnail, retaining author/license attribution."""
+    IMAGE_DIR.mkdir(exist_ok=True)
+    image_path = IMAGE_DIR / f"{iid}.jpg"
+    info_path = IMAGE_DIR / f"{iid}.txt"
+    if image_path.exists() and image_path.stat().st_size > 5000:
+        attribution = info_path.read_text(encoding="utf-8") if info_path.exists() else ""
+        return str(image_path), attribution
+
+    search_term = COMMONS_QUERIES.get(iid)
+    if not search_term:
+        return None, ""
+    api = "https://commons.wikimedia.org/w/api.php"
+    params = {
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": search_term, "gsrnamespace": 6, "gsrlimit": 8,
+        "prop": "imageinfo", "iiprop": "url|extmetadata",
+        "iiurlwidth": 1000,
+    }
+    headers = {"User-Agent": "YazdTravelBot/1.0 (educational tourism project)"}
+    response = requests.get(api, params=params, headers=headers, timeout=20)
+    response.raise_for_status()
+    pages = response.json().get("query", {}).get("pages", {})
+    candidates = sorted(pages.values(), key=lambda p: p.get("index", 999))
+    for page in candidates:
+        image_info = (page.get("imageinfo") or [{}])[0]
+        image_url = image_info.get("thumburl") or image_info.get("url")
+        if not image_url:
+            continue
+        meta = image_info.get("extmetadata", {})
+        license_name = html.unescape(meta.get("LicenseShortName", {}).get("value", "License not specified"))
+        artist = html.unescape(meta.get("Artist", {}).get("value", "Author not listed"))
+        description_url = image_info.get("descriptionurl", "")
+        try:
+            photo_response = requests.get(image_url, headers=headers, timeout=30)
+            photo_response.raise_for_status()
+            content_type = photo_response.headers.get("Content-Type", "")
+            if not content_type.startswith("image/") or len(photo_response.content) < 5000:
+                continue
+            image_path.write_bytes(photo_response.content)
+            attribution = f"عکس: Wikimedia Commons | پدیدآور: {artist} | مجوز: {license_name}\n{description_url}"
+            info_path.write_text(attribution, encoding="utf-8")
+            return str(image_path), attribution
+        except requests.RequestException:
+            continue
+    return None, ""
+
+async def send_item_details(message, iid):
+    title, description, section_key, _coords = ITEMS[iid]
+    caption = f"{title}\n\n{description}"
+    try:
+        photo_path, attribution = await asyncio.to_thread(_commons_photo, iid)
+        if photo_path:
+            if attribution:
+                caption += "\n\n" + attribution
+            with open(photo_path, "rb") as photo:
+                await message.reply_photo(
+                    photo=photo, caption=caption[:1024],
+                    reply_markup=item_kb(iid, section_key),
+                )
+            return
+    except Exception:
+        logger.exception("Could not load Commons image for %s", iid)
+    await message.reply_text(caption, reply_markup=item_kb(iid, section_key))
 
 # ---------------------------------------------------------------------------
 # محتوای راهنمای گردشگری
@@ -885,11 +987,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(SECTIONS[key][0], reply_markup=section_kb(key))
 
     elif action == "item" and key in ITEMS:
-        title, description, section_key, _ = ITEMS[key]
-        await query.edit_message_text(
-            f"{title}\n\n{description}",
-            reply_markup=item_kb(key, section_key),
-        )
+        # جزئیات و عکس جاذبه در یک پیام جداگانه ارسال می‌شود.
+        await send_item_details(query.message, key)
 
     elif action == "loc" and key in ITEMS:
         coords = ITEMS[key][3]
